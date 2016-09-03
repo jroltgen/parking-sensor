@@ -5,8 +5,9 @@ const unsigned char STATE_NEARING  = 2;
 const unsigned char STATE_PARKED   = 3;
 
 unsigned char state;
+unsigned char pending_state;
 unsigned short time_state_entered_ms;
-const unsigned short INACTIVITY_TIMEOUT_MS = 30 * 1000; // 30 seconds
+const unsigned short INACTIVITY_TIMEOUT_MS = 10 * 1000; // 30 seconds
 
 
 // The pin used to trigger and echo on the rangefinder
@@ -15,8 +16,7 @@ const int ECHO_PIN = 5;
 const int RED_PIN = 2;
 const int GREEN_PIN = 3;
 
-// Defined by the part datasheet 
-const int MS_PER_INCH = 148;
+
 
 // LED PWM pin, PWM pin mode not necessary
 const int LED_PWM_PIN = 5;
@@ -24,7 +24,12 @@ const int LED_PWM_PIN = 5;
 void setup() {
   // Configure state
   state = STATE_INACTIVE;
+  pending_state = STATE_INACTIVE;
   time_state_entered_ms = millis();
+
+  // Configure red and green pins as output.
+  pinMode( RED_PIN, OUTPUT );
+  pinMode( GREEN_PIN, OUTPUT );
   
   // Configure trigger pin as output.
   pinMode( TRIGGER_PIN, OUTPUT );
@@ -45,33 +50,35 @@ void setup() {
 void loop() {
   // Trigger the pulse.
   trigger();
-
-  // Time the reply.
-  const unsigned long TIMEOUT_MS = 40000; // 40 mS
-  unsigned long duration_ms = pulseIn( ECHO_PIN, HIGH, TIMEOUT_MS );
-
-
   
-  // Output to console
-  float range_feet = duration_ms / MS_PER_INCH / 12.0f; // 12 - inches per foot
-  Serial.println( range_feet );
-  
-  check_state( range_feet );
-  handle_state();
+  check_state( time_reply() );
+  display_state();
 
-  // Convert to PWM - range bound to 1000 to 10,000
-  //output_pwm( duration );
-
-  // Take readings at about 10 hz
+  // Take readings at about 5 hz
   // Note - part requires minimum 10ms delay between triggers.
-  const unsigned long DELAY_MS = 250;
+  const unsigned long DELAY_MS = 200;
   delay( DELAY_MS );
 }
 
-void trigger() {
+void trigger()
+{
   digitalWrite( TRIGGER_PIN, HIGH );
   delayMicroseconds( 10 );
   digitalWrite( TRIGGER_PIN, LOW );
+}
+
+float time_reply()
+{
+  const int MS_PER_INCH = 148; // Defined by the part datasheet 
+  const unsigned long TIMEOUT_US = 100000; // 100 ms
+  unsigned long duration_ms = pulseIn( ECHO_PIN, HIGH, TIMEOUT_US );
+
+  // Return range in feet
+  float range_feet = duration_ms / MS_PER_INCH / 12.0f; // 12 - inches per foot
+  Serial.print( duration_ms );
+  Serial.print( ", " );
+  Serial.println( range_feet );
+  return range_feet;
 }
 
 //void output_pwm( int duration ) {
@@ -94,77 +101,73 @@ void trigger() {
 
 void check_state( float distance_ft )
 {
-const float TRACKING_DISTANCE = 10.0f;
-const float NEARING_DISTANCE = 5.0f;
+const float TRACKING_DISTANCE = 12.0f;
+const float NEARING_DISTANCE = 6.0f;
 const float PARKED_DISTANCE = 3.5f;
-  
-  switch( state )
+
+if( distance_ft < 0.01 )
   {
-    case STATE_INACTIVE:
-      if( distance_ft > NEARING_DISTANCE && distance_ft < TRACKING_DISTANCE )
-        {
-        go_to_state( STATE_TRACKING );
-        }
-      break;
-
-    case STATE_TRACKING:
-      if( distance_ft > TRACKING_DISTANCE )
-        {
-        go_to_state( STATE_INACTIVE );
-        }
-      else if( distance_ft < NEARING_DISTANCE )
-        {
-        go_to_state( STATE_NEARING );
-        }
-      else
-        {
-        check_inactive();
-        }
-      break;
-
-    case STATE_NEARING:
-      if( distance_ft > NEARING_DISTANCE )
-        {
-        go_to_state( STATE_TRACKING );
-        }
-      else if( distance_ft < PARKED_DISTANCE )
-        {
-        go_to_state( STATE_PARKED );
-        }
-      else
-        {
-        check_inactive();
-        }
-      break;
-
-    case STATE_PARKED:
-      if( distance_ft > PARKED_DISTANCE )
-        {
-        go_to_state( STATE_NEARING );
-        }
-      else
-        {
-        check_inactive();
-        }
-      break;
+  // Invalid.  Bail.
+  return;  
   }
-}
-
-void check_inactive()
-{
-  if( millis() - time_state_entered_ms > INACTIVITY_TIMEOUT_MS )
+  
+if( state == STATE_INACTIVE )
+  {
+  if( distance_ft > NEARING_DISTANCE && distance_ft < TRACKING_DISTANCE )
+    {
+    go_to_state( STATE_TRACKING );
+    }
+  }
+else
+  {
+  if( distance_ft >= TRACKING_DISTANCE && state != STATE_INACTIVE )
     {
     go_to_state( STATE_INACTIVE );
     }
+  else if( distance_ft < TRACKING_DISTANCE && distance_ft >= NEARING_DISTANCE && state != STATE_TRACKING )
+    {
+    go_to_state( STATE_TRACKING );
+    }
+  else if( distance_ft < NEARING_DISTANCE && distance_ft >= PARKED_DISTANCE && state != STATE_NEARING )
+    {
+    go_to_state( STATE_NEARING );
+    }
+  else if( distance_ft < PARKED_DISTANCE && state != STATE_PARKED )
+    {
+    go_to_state( STATE_PARKED );
+    }
+  else if( millis() - time_state_entered_ms > INACTIVITY_TIMEOUT_MS )
+    {
+    go_to_state( STATE_INACTIVE );
+    }
+  }
+   
 }
 
 void go_to_state( const unsigned char new_state )
 {
-  state = new_state;
-  time_state_entered_ms = millis();
+  static unsigned short state_cnt;
+  static const unsigned short NUM_STATES_FILTER = 2;
+  if( new_state != pending_state )
+    {
+    pending_state = new_state;
+    state_cnt = 0;
+    }
+  state_cnt++;
+  Serial.print("Cur: ");
+  Serial.print( state );
+  Serial.print(", New: ");
+  Serial.println( new_state );
+
+  if( state_cnt >= NUM_STATES_FILTER )
+    {
+    state = new_state;
+    pending_state = new_state;
+    time_state_entered_ms = millis();
+    }
 }
 
-void handle_state()
+void display_state()
 {
   switch( state )
   {
@@ -174,15 +177,15 @@ void handle_state()
       break;
 
     case STATE_TRACKING:
-      // TODO flashing
       digitalWrite( RED_PIN, LOW );
       digitalWrite( GREEN_PIN, HIGH );
       break;
 
     case STATE_NEARING:
-      // TODO flashing
-      digitalWrite( RED_PIN, HIGH );
-      digitalWrite( GREEN_PIN, HIGH );
+      static int current_green_state = HIGH;
+      current_green_state = !current_green_state;
+      digitalWrite( RED_PIN, LOW );
+      digitalWrite( GREEN_PIN, current_green_state );
       break;
 
     case STATE_PARKED:
